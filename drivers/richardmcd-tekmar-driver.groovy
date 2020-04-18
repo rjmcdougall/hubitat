@@ -205,6 +205,7 @@ def enableReporting() {
     dump = dump_hex(pck);    
     log.debug "${device.label}:  ${dump}"
     
+    //pck = "CA0606000F010000011D35";
     
     sendMsg(pck);
 }
@@ -441,9 +442,12 @@ def tstatName(Integer addr) {
                     208 : 'Sam',
                     209 : 'Garage',
                     210 : 'Shop',
-                    2001 : 'Patio',
-                    2002 : 'DHW',
-                    3018 : 'Pool House'
+                    2001 : 'Patio (2)',
+                    2002 : 'DHW (2)',
+                    2018 : 'Pool House (2)',
+                    3001 : 'Patio (3)',
+                    3002 : 'DHW (3)',
+                    3018 : 'Pool House (3)'
     ];
         return tstatNames[addr];
 }
@@ -587,9 +591,11 @@ def createTstat(addr, name) {
     if ((newDevice != null) && (newDevice.label.equals(name) == false)) {
         deleteChildDevice(childDeviceNetworkId)
         addChildDevice("proto", "Tekmar Thermostat", childDeviceNetworkId, [name: devname, isComponent: false, label: name])
+        // Maybe use setDisplayName(String displayName) instead?
         if (dbgEnable)
 		    log.debug "${device.label}: rename addr: ${addr}, name: ${name}"
     }
+    
                                  
 }
 	
