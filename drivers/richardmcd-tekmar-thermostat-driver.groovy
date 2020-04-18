@@ -12,8 +12,6 @@
  *  for more details.
  *
  *  Name: Tekmar Thermostat
- *  Author: Richard McDougall
- *  Created: April, 2020
  *
  ***********************************************************************************************************************/
 
@@ -152,12 +150,20 @@ def parse(HashMap data) {
 		    sendEvent(name: "temperature", value: fTemp, descriptionText: descriptionText)
 	}
     
+    if (data.containsKey("mode") && (demand = data["mode"]) && 
+        (device.currentState("mode")?.value == null || device.currentState("mode").value != demand)) {
+		    descriptionText = "${device.label} mode is ${demand}"
+		    if (txtEnable)
+			    log.info descriptionText
+		    sendEvent(name: "thermostatMode", value: mode, descriptionText: descriptionText)
+	}  
+    
     if (data.containsKey("demand") && (demand = data["demand"]) && 
         (device.currentState("demand")?.value == null || device.currentState("demand").value != demand)) {
 		    descriptionText = "${device.label} demand is ${demand}"
 		    if (txtEnable)
 			    log.info descriptionText
-		    sendEvent(name: "thermostatMode", value: demand, descriptionText: descriptionText)
+		    sendEvent(name: "thermostatFanMode", value: demand, descriptionText: descriptionText)
 	}    
     
     if (data.containsKey("CoolSetpoint") && (coolingSetpoint = data["CoolSetpoint"]) && 
@@ -250,22 +256,33 @@ String getThermID() {
 @Field final Map tekmarThermostatMode = 
     ['0': Off, 
      '1': Heat, 
-     '2': Cool, 
-     '3': Auto, 
-     '4': EmergencyHeat]
+     '2': Auto, 
+     '3': Cool, 
+     '4': Vent, 
+     '5': Mode5, 
+     '6': EmergencyHeat]
 @Field final Map tekmarThermostatHold = 
     ['0': Off, 
      '1': On]
 @Field final Map tekmarThermostatFan = 
-    ['0': Auto,
-     '1': On]
+    ['0': Off, 
+     '1': Heat, 
+     '2': Auto, 
+     '3': Cool, 
+     '4': Vent, 
+     '5': Mode5, 
+     '6': EmergencyHeat]
 
 @Field static final String On = "on"
 @Field static final String Off = "off"
 @Field static final String Heat = "heat"
 @Field static final String Cool = "cool"
 @Field static final String Auto = "auto"
-@Field static final String Circulate = "circulate"
+@Field static final String Mode5 = "mode5"
+@Field static final String Vent = "vent"
 @Field static final String EmergencyHeat = "emergency heat"
 @Field static final String FanAuto = "fan auto"
 @Field static final String FanOn = "fan on"
+
+
+
