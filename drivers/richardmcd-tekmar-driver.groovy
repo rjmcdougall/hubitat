@@ -22,6 +22,7 @@
 public static String version() { return "v0.1" }
 
 import groovy.transform.Field
+import hubitat.helper.HexUtils
 
 metadata {
 	definition(name: "Tekmar 482 Driver", namespace: "proto", author: "Richard McDougall") {
@@ -61,7 +62,7 @@ def installed() {
 def updated() {
 	log.info "${device.label} Updated..."
 	if (dbgEnable)
-		log.debug "${device.label}: Configuring IP: ${ip}, Port ${port}, Keypad ${keypad}, Code: ${code != ""}, Timeout: ${timeout}"
+		log.debug "${device.label}: Configuring IP: ${ip}, Port ${port}, Timeout: ${timeout}"
 	initialize()
 }
 
@@ -82,17 +83,21 @@ def initialize() {
 	boolean success = true
 	try {
 		//open telnet connection
-		telnetConnect([termChars: [53]], ip, port.toInteger(), null, null)
+		//telnetConnect([termChars: [53]], ip, port.toInteger(), null, null)
+        interfaces.rawSocket.connect(ip, port.toInteger(), 
+                                     byteInterface: true,
+								     //readDelay: 150,
+                                     eol: 53)
 		//give it a chance to start
 		pauseExecution(1000)
 		if (dbgEnable)
-			log.debug "${device.label}: Telnet connection to Tekmar 482 established"
+			log.debug "${device.label}: Socket connection to Tekmar 482 established"
 	} catch (e) {
 		log.warn "${device.label}: initialize error: ${e.message}"
 		success = false
 	}
 	if (success) {
-		heartbeat() // Start checking for telnet timeout
+		heartbeat() // Start checking for  timeout
 		refresh()
 	}
 }
@@ -128,6 +133,8 @@ def refresh() {
     //List<hubitat.device.HubAction> cmds = []
 	//cmds.add(refreshTemperatureStatus())
 	//return delayBetween(cmds, 1000)
+    
+    //socketStatus(String message)
     enableReporting()
 }
 
@@ -135,7 +142,7 @@ def refresh() {
 
 
 def uninstalled() {
-	telnetClose()
+	interfaces.rawSocket.close()
 	removeChildDevices(getChildDevices())
 }
 
@@ -193,42 +200,96 @@ private String unhexify(String hexStr) {
   return output.toString();
 }
 
-def enableReporting() {
-    //CA 05 06 00 0F 01 00 00 1B 35 
-    //CA 05 06 00 0F 01 00 00 01 1D 35
-    //CA 06 06 00 0F 01 00 00 01 1D 35 
-    pck = unhexify("CA0606000F010000011D35"); 
-    dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
-    
-    pck = unhexify("CA050600670100007335"); 
-    dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
-    
-    //pck = "CA0606000F010000011D35";
-    
-    sendMsg(pck);
-}
-
-
-
-Integer CHAR_SOM = 0xCA;
-Integer CHAR_ESC = 0x2f;
-Integer CHAR_EOM = 53;
-
-
+Integer TEKMAR_TYPE = 0x06;
+Integer TEKMAR_SOM  = 0xCA;
+Integer TEKMAR_ESC  = 0x2f;
+Integer TEKMAR_EOM  = 0x35;
 
 def unpack(message) {
     def s = "";
     def lastChar = 0;
     for (char b: message) {
-        if ((lastChar.compareTo(0x2f) == 0) || b.compareTo(0x2f) != 0) {
+        if ((lastChar.compareTo(TEKMAR_ESC) == 0) || b.compareTo(TEKMAR_ESC) != 0) {
             s = s + b;
         }
         lastChar = b;
     }
     return s;
 }
+
+def tekmarChecksum(pck) {
+    checksum = 0
+    for (b in pck) {
+        checksum += (b & 0xff)
+    }
+    return checksum & 0xFF
+}
+        
+
+def createTRPC(packet) {
+    service = packet['service']
+    method = packet['method']
+    data = hubitat.helper.HexUtils.hexStringToByteArray(packet['data'])
+    len = 5 + data.length()
+    
+    packetlength = len + 5
+    log.debug("${device.label}: Packet method $method length $len csum $checksum totalpcklen = $packetlength")
+    pck = Byte[packetlength] 
+    pck[0] = TEKMAR_SOF
+    pck[1] = len
+    pck[2] = TEKMAR_TYPE
+    pck[3] = service
+    pck[4] = method & 0xFF
+    pck[5] = (method << 8) & 0xFF
+    pck[6] = (method << 16) & 0xFF
+    d = 0
+    p = 7
+    for (b in data) {
+        pck[p] = data[d];
+        p++;
+        d++;
+    }
+    checksum = tekmarChecksum(pck.getAt(1));
+    pck[p + 1] = checksum
+    pck[p + 2] = TEKMAR_EOM
+    return pck
+}
+    
+    
+    
+
+def enableReporting() {
+    //CA 05 06 00 0F 01 00 00 1B 35 
+    //CA 05 06 00 0F 01 00 00 01 1D 35
+    //CA 06 06 00 0F 01 00 00 01 1D 35 
+    //pck = unhexify("CA0606000F010000011D35"); 
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+    
+    //pck = unhexify("CA050600670100007335"); 
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+    
+    //pck = "CA0606000F010000011D35";
+    
+    def packet
+    packet['service'] = 0
+    packet['method']  = methodNum('ReportingState')
+    packet['data'] = {(byte) 0x01}
+    
+    pck = createTRPC(packet)
+    dump = dump_hex(pck);    
+    log.debug "${device.label}:  ${dump}"
+
+    //sendMsg(pck);
+    interfaces.rawSocket.sendMessage(pck)
+}
+
+
+
+
+
+
 
 def serviceName(service) {
     
@@ -241,36 +302,42 @@ def serviceName(service) {
     return services[service];
 }
 
+def tekmarMethods = [ 
+                0x000 : 'NullMethod',
+                0x107 : 'NetworkError',
+                0x10F : 'ReportingState',
+                0x117 : 'OutdoorTemp',
+                0x11F : 'DeviceAttributes',
+                0x127 : 'ModeSetting',
+                0x12F : 'ActiveDemand',
+                0x137 : 'CurrentTemperature',
+                0x138 : 'CurrentFloorTemp',
+                0x13F : 'HeatSetpoint',
+                0x147 : 'CoolSetpoint',
+                0x14F : 'SlabSetpoint',
+                0x157 : 'FanPercent',
+                0x15F : 'TakingAddress',
+                0x167 : 'DeviceInventory',
+                0x16F : 'SetbackEnable',
+                0x177 : 'SetbackState',
+                0X17F : 'SetbackEvents',
+                0x187 : 'FirmwareRevision',
+                0x18F : 'ProtocolVersion',
+                0x197 : 'DeviceType',
+                0x19F : 'DeviceVersion',
+                0x1A7 : 'DateTime',
+                0x13D : 'SetpointGroupEnable',
+                0x13E : 'SetpointDevice',
+                0x150 : 'RelativeHumidity',
+                0x151 : 'HumidityMax',
+                0x152 : 'HumidityMin'];
+
 def methodName(Integer method) {
-    def methods = [ 0x000 : 'NullMethod',
-                    0x107 : 'NetworkError',
-                    0x10F : 'ReportingState',
-                    0x117 : 'OutdoorTemp',
-                    0x11F : 'DeviceAttributes',
-                    0x127 : 'ModeSetting',
-                    0x12F : 'ActiveDemand',
-                    0x137 : 'CurrentTemperature',
-                    0x138 : 'CurrentFloorTemp',
-                    0x13F : 'HeatSetpoint',
-                    0x147 : 'CoolSetpoint',
-                    0x14F : 'SlabSetpoint',
-                    0x157 : 'FanPercent',
-                    0x15F : 'TakingAddress',
-                    0x167 : 'DeviceInventory',
-                    0x16F : 'SetbackEnable',
-                    0x177 : 'SetbackState',
-                    0X17F : 'SetbackEvents',
-                    0x187 : 'FirmwareRevision',
-                    0x18F : 'ProtocolVersion',
-                    0x197 : 'DeviceType',
-                    0x19F : 'DeviceVersion',
-                    0x1A7 : 'DateTime',
-                    0x13D : 'SetpointGroupEnable',
-                    0x13E : 'SetpointDevice',
-                    0x150 : 'RelativeHumidity',
-                    0x151 : 'HumidityMax',
-                    0x152 : 'HumidityMin'];
-        return methods[method];
+        return tekmarMethods[method];
+}
+
+def methodNum(String methodName) {
+    return tekmarMethods.collectMany{ k,v -> (v == methodName) ? [k] : []}
 }
 
 def methodAddressField(String method) {
@@ -455,16 +522,19 @@ def tstatName(Integer addr) {
 // Tekmar 482 Event Receipt Lines
 def parse(String message) {
     
-    def unpacked = unpack(message);
+    pck = hubitat.helper.HexUtils.hexStringToByteArray(message)
     
-    def raw = dump_hex(message);
+    def unpacked = unpack(pck);
+    
+    def raw = dump_hex(pck);
     def m = dump_hex(unpacked);
     
     if (dbgEnable) {
         //log.debug "${device.label} byte " + s;
         //s = dump_hex(message);
         //u = dump_hex(unpacked);
-		//log.debug "${device.label} Parsing Incoming message    :   $m";
+		log.debug "${device.label} Parsing Incoming message    :   $raw";
+		log.debug "${device.label} Parsing Incoming message    :   $m";
     }
     
     // Decode header
@@ -472,7 +542,7 @@ def parse(String message) {
     byte rpcType = unpacked.charAt(2);
     
     if (rpcType != 6) {
-        log.debug "${device.label} not a tekmar message    :  $u";
+        log.debug "${device.label} not a tekmar message    :  $raw";
         return
     }
     
@@ -555,7 +625,8 @@ def parse(String message) {
 
 
 hubitat.device.HubAction sendMsg(String msg) {
-	return new hubitat.device.HubAction(msg, hubitat.device.Protocol.TELNET)
+	//return new hubitat.device.HubAction(msg, hubitat.device.Protocol.TELNET)
+    //return new sendMessage(String msg)
 }
 
 hubitat.device.HubAction sendMsg(hubitat.device.HubAction action = null) {
