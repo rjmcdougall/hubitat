@@ -298,7 +298,7 @@ def queryTstat(addrStr) {
     def data = String.format("%02X%02X0000", addr & 0xff, (addr >> 8) & 0xff)
     
     def packet = [
-        'service' : 0,
+        'service' : 1,
         'method' :  0x127,//methodNum('ReportingState'),
         'data' : data
         ]
