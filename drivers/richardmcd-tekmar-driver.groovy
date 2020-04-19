@@ -17,6 +17,17 @@
  *
  *  Protocol Reference: http://www.tekmarcontrols.com/products/accessories/482-firmware-update/7-products/219-tekmar-home-automation-protocol.html
  *
+ *  TODO:
+ *     - make f whole numbers
+ *     - change mode
+ *     - change fan mode
+ *     - make hash lists common
+ *     - checksum incoming messages
+ *     - fan relay output
+ *     - outdoor temp as temperature sensor
+ *     - what to do with floor temp measurements and setpoints?
+ *
+ *
  ***********************************************************************************************************************/
 
 public static String version() { return "v0.1" }
@@ -27,11 +38,10 @@ import hubitat.helper.HexUtils
 metadata {
 	definition(name: "Tekmar 482 Driver", namespace: "proto", author: "Richard McDougall") {
 		capability "Initialize"
-		capability "Telnet"
         capability "Configuration"
         capability "Thermostat"
+        
 		command "refreshTemperatureStatus"
-//		command "sendMsg"
 	}
 	preferences {
 		input name: "ip", type: "text", title: "IP Address", required: true
@@ -214,101 +224,6 @@ def unpack(message) {
     return s;
 }
 
-def tekmarChecksum(pck) {
-    checksum = 0
-    for (b in pck) {
-        checksum += (b & 0xff)
-    }
-    return checksum & 0xFF
-}
-        
-
-def createTRPC(packet) {
-    
-    service = packet['service']
-    method = packet['method']
-    byte[] data = hubitat.helper.HexUtils.hexStringToByteArray(packet['data'])
-    len = 5 + data.length
-    
-    packetlength = len + 5
-    Byte[] pck = new Byte[packetlength]
-    pck[0] = tekmarTokens('SOM')
-    pck[1] = len
-    pck[2] = tekmarTokens('TYPE')
-    pck[3] = service
-    pck[4] = method & 0xFF
-    pck[5] = (method >> 8) & 0xFF
-    pck[6] = (method >> 16) & 0xFF
-    pck[7] = (method >> 24) & 0xFF
-    d = 0
-    p = 8
-    for (b in data) {
-        pck[p] = data[d];
-        p++;
-        d++;
-    }
-    checksum = tekmarChecksum(pck[1..(pck.length - 3)]);
-    pck[p] = checksum
-    pck[p + 1] = tekmarTokens('EOM')
-    return pck
-}
-    
-    
-    
-
-def enableReporting() {
-    //CA 05 06 00 0F 01 00 00 1B 35 
-    //CA 05 06 00 0F 01 00 00 01 1D 35
-    //CA 06 06 00 0F 01 00 00 01 1D 35 
-    //pck = unhexify("CA0606000F010000011D35"); 
-    //dump = dump_hex(pck);    
-    //log.debug "${device.label}:  ${dump}"
-    
-    //pck = unhexify("CA050600670100007335"); 
-    //dump = dump_hex(pck);    
-    //log.debug "${device.label}:  ${dump}"
-    
-    //pck = "CA0606000F010000011D35";
-    
-    def packet = [
-        'service' : 0,
-        'method' :  0x10F,//methodNum('ReportingState'),
-        'data' : "01"
-        ]
-    // CA 09 06 02 38 01 00 00 CB 00 E6 05 00 35 
-    
-    pck = createTRPC(packet)
-    dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
-
-    //sendMsg(pck);
-    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
-}
-
-
-// To request the mode of thermostat with address 0001:
-// Byte Index	0	1	2	3	4	5	6	6	7	8	9	10	11	12
-// Content	     SOF	Length	Type	Service	Method(0)	Method(1)	Method(2)	Method(3)	Data(0)	Data(1)	Data(3)	Data(4)	CS	EOF
-// Hex Value	0xca	0x09	0x06	0x01	0x27	   0x01	        0x00	    0x00	    0x01	0x00	0x00	0x00	0x39	0x35
-
-def queryTstat(addrStr) {
-    
-    addr = addrStr as int
-    
-    def data = String.format("%02X%02X0000", addr & 0xff, (addr >> 8) & 0xff)
-    
-    def packet = [
-        'service' : 1,
-        'method' :  0x127,//methodNum('ReportingState'),
-        'data' : data
-        ]
-    
-    pck = createTRPC(packet)
-    dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
-
-    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
-}
 
 
 
@@ -390,7 +305,7 @@ def methodNum(String methodName) {
                 0x150 : 'RelativeHumidity',
                 0x151 : 'HumidityMax',
                 0x152 : 'HumidityMin'];
-    return tekmarMethods.collectMany{ k,v -> (v == methodName) ? [k] : []}
+    return (tekmarMethods.collectMany{ k,v -> (v == methodName) ? [k] : []}[0] as Integer)
 }
 
 def methodAddressField(String method) {
@@ -461,24 +376,7 @@ def methodTempField(String method) {
     return methodTemp[method];
 }
 
-def methodDemandField(demand) {
-   def methodDemand = [ 
-        0: 'Off',
-        1: 'Heat',
-        3: 'Cool'
-    ];
-    return methodDemand[demand];
-}
 
-def methodDeviceCapabilityField(capability) {
-   def methodDeviceCapability = [ 
-        0: 'Off',
-        2: 'Heat',
-        4: 'Cool',
-        8: 'Slab'
-    ];
-    return methodDeviceCapability[capability];
-}
 
 def tekmarAddress(String message, Integer offset) {
     byte addrLow = message.charAt(offset);
@@ -541,16 +439,40 @@ def methodTempEField(String method) {
     return methodTempE[method];
 }
 
-
-def tekmarTempE(String message, Integer offset) {
+// Tekmar DegE Conversions
+def tekmarFromTempE(String message, Integer offset) {
     byte tempLow = message.charAt(offset);
     Float degE = (tempLow & 0xFF);
-    // degH = 10*(degF) + 850
+    // degF = 10*(degF) + 850
     Float tempF = ((degE / 2) * 1.8) + 32
     return tempF;
 }
 
+def tekmarToTempE(tempF) {
+    // degE = 2 *(degC)
+    Integer degE = 2 * ((tempF - 32) / 1.8)
+    return degE;
+}
 
+@Field static Map tekmarDemands = [ 
+        0: 'Off',
+        1: 'Heat',
+        3: 'Cool'
+    ];
+
+def methodDemandField(demand) {
+    return tekmarDemands[demand];
+}
+
+def methodDeviceCapabilityField(capability) {
+   def methodDeviceCapability = [ 
+        0: 'Off',
+        2: 'Heat',
+        4: 'Cool',
+        8: 'Slab'
+    ];
+    return methodDeviceCapability[capability];
+}
 
 def tekmarDemand(String message, Integer offset) {
 
@@ -562,17 +484,22 @@ def tekmarDemand(String message, Integer offset) {
     return demandStr;
 }
 
-def methodModeField(mode) {
-   def methodMode = [ 
+
+@Field final Map tekmarModes = [ 
         0: 'Off',
         1: 'Heat',
         2: 'Auto',
         3: 'Cool',
         4: 'Vent',
-        5: 'Mode5',
         6: 'Emergency'
     ];
-    return methodMode[mode];
+
+def methodModeField(mode) {
+    return tekmarModes[mode];
+}
+
+def modeNum(mode) {
+    return (tekmarModes.collectMany{ k,v -> (v == mode) ? [k] : []}[0] as Integer)
 }
 
 
@@ -626,8 +553,8 @@ def parse(String message) {
         //log.debug "${device.label} byte " + s;
         //s = dump_hex(message);
         //u = dump_hex(unpacked);
-		log.debug "${device.label} Parsing Incoming message    :   $raw";
-		log.debug "${device.label} Parsing Incoming message    :   $m";
+		//log.debug "${device.label} Parsing Incoming message    :   $raw";
+		//log.debug "${device.label} Parsing Incoming message    :   $m";
     }
     
     // Decode header
@@ -652,7 +579,7 @@ def parse(String message) {
     
     if (dbgEnable) {
         //log.debug "${device.label} service : " + String.format("%04X: %s", service, serviceName);
-        log.debug "${device.label} method  : " + String.format("%04X:%s, %04X:%s", service, serviceName, method, methodName);
+        log.debug "${device.label} method  : " + String.format("%04X:%s, %04X:%s [%s]", service, serviceName, method, methodName, m);
     }
     
     HashMap data = [:];
@@ -683,8 +610,13 @@ def parse(String message) {
     
     // If the message has a Tekmar set temp, extract it
     if ((offset = methodTempEField(methodName)) > 1) {
-        setpoint = tekmarTempE(unpacked, offset);
+        setpoint = tekmarFromTempE(unpacked, offset);
         data[methodName] = setpoint;
+        // Also kick the same theromostat to report it's mode setting
+        // since this doesn't get reported automatically
+        if (data.containsKey("tstatId")) {
+            queryTstat(data["tstatId"]);
+        }
     }
     
     
@@ -698,16 +630,14 @@ def parse(String message) {
     if (methodName.equals("ModeSetting") == true) {
         mode = tekmarMode(unpacked, 10);
         data["mode"] = mode;
-    }  else if (data.containsKey("tstatId")) {
-        queryTstat(data["tstatId"]);
-    }
+    } 
     
     if (data.containsKey("tstatId")) {
         createTstat(data["tstatId"],  data["tstatName"] + " Climate");
     }
     
     debugStr = methodName;
-    if (dbgEnable) {
+    if (0) {
         if (data.containsKey("tstatId")) {
             debugStr = debugStr + String.format(" address %d:%s", data["tstatId"], data["tstatId"]);
         }
@@ -790,6 +720,190 @@ def updateChildDevice(data) {
         childDevice.parse(data);
     }
 }
+def tekmarChecksum(pck) {
+    checksum = 0
+    for (b in pck) {
+        checksum += (b & 0xff)
+    }
+    return checksum & 0xFF
+}
+        
+
+def createTRPC(packet) {
     
+    service = packet['service']
+    method = packet['method']
+    byte[] data = hubitat.helper.HexUtils.hexStringToByteArray(packet['data'])
+    len = 5 + data.length
+    
+    packetlength = len + 5
+    Byte[] pck = new Byte[packetlength]
+    pck[0] = tekmarTokens('SOM')
+    pck[1] = len
+    pck[2] = tekmarTokens('TYPE')
+    pck[3] = service
+    pck[4] = method & 0xFF
+    pck[5] = (method >> 8) & 0xFF
+    pck[6] = (method >> 16) & 0xFF
+    pck[7] = (method >> 24) & 0xFF
+    d = 0
+    p = 8
+    for (b in data) {
+        pck[p] = data[d];
+        p++;
+        d++;
+    }
+    checksum = tekmarChecksum(pck[1..(pck.length - 3)]);
+    pck[p] = checksum
+    pck[p + 1] = tekmarTokens('EOM')
+    return pck
+}
+    
+    
+    
+
+def enableReporting() {
+    //CA 05 06 00 0F 01 00 00 1B 35 
+    //CA 05 06 00 0F 01 00 00 01 1D 35
+    //CA 06 06 00 0F 01 00 00 01 1D 35 
+    //pck = unhexify("CA0606000F010000011D35"); 
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+    
+    //pck = unhexify("CA050600670100007335"); 
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+    
+    //pck = "CA0606000F010000011D35";
+    
+    def packet = [
+        'service' : 0,
+        'method' :  0x10F,//methodNum('ReportingState'),
+        'data' : "01"
+        ]
+    // CA 09 06 02 38 01 00 00 CB 00 E6 05 00 35 
+    
+    pck = createTRPC(packet)
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+
+    //sendMsg(pck);
+    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
+}
+
+
+// To request the mode of thermostat with address 0001:
+// Byte Index	0	1	2	3	4	5	6	6	7	8	9	10	11	12
+// Content	     SOF	Length	Type	Service	Method(0)	Method(1)	Method(2)	Method(3)	Data(0)	Data(1)	Data(3)	Data(4)	CS	EOF
+// Hex Value	0xca	0x09	0x06	0x01	0x27	   0x01	        0x00	    0x00	    0x01	0x00	0x00	0x00	0x39	0x35
+
+def queryTstat(addrStr) {
+    
+    addr = addrStr as int
+    
+    def data = String.format("%02X%02X0000", addr & 0xff, (addr >> 8) & 0xff)
+    
+    def packet = [
+        'service' : 1,
+        'method' :  0x127,//methodNum('ReportingState'),
+        'data' : data
+        ]
+    
+    pck = createTRPC(packet)
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+
+    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
+}
+
+
+def setPoint(addrStr, temp, setBackState, mode) {
+    addr = addrStr as int
+    
+    if (mode.equals("Heat")) {
+        method = methodNum('HeatSetpoint')
+    } else {
+        method = methodNum('CoolSetpoint')
+    }
+    
+    if (method == null) {
+        return
+    }
+    
+    log.debug "${device.label} setPoint ${method}"
+        
+    def data = String.format("%02X%02X%02X%02X", 
+                             addr & 0xff, (addr >> 8) & 0xff,
+                             setBackState,
+                             tekmarToTempE(temp))
+    
+    def packet = [
+        'service' : 0,
+        'method' :  method,
+        'data' : data
+        ]
+    
+    pck = createTRPC(packet)
+    dump = dump_hex(pck);    
+    log.debug "${device.label}:  ${dump}"
+
+    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
+}
+
+def setMode(addrStr, modeStr) {
+    addr = addrStr as int
+    
+    method = methodNum('ModeSetting')
+    
+    if (method == null) {
+        return
+    }
+    
+    log.debug "${device.label} setMode ${method}"
+        
+    def data = String.format("%02X%02X%02X", 
+                             addr & 0xff, (addr >> 8) & 0xff,
+                             modeNum(modeStr))
+    
+    def packet = [
+        'service' : 0,
+        'method' :  method,
+        'data' : data
+        ]
+    
+    pck = createTRPC(packet)
+    dump = dump_hex(pck);    
+    log.debug "${device.label}:  ${dump}"
+
+    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
+}
+
+
+hubitat.device.HubAction setHeatingSetpoint(BigDecimal degrees, String addr) {
+	if (dbgEnable)
+		log.debug "${device.label} setHeatingSetpoint tstat: ${addr} temperature ${degrees}"
+    // Todo: add setback support
+    setPoint(addr, degrees, 0, "Heat")
+}
+
+hubitat.device.HubAction setCoolingSetpoint(BigDecimal degrees, String addr) {
+	if (dbgEnable)
+		log.debug "${device.label} setCoolingSetpoint tstat: ${addr} temperature ${degrees}"
+    // Todo: add setback support
+    setPoint(addr, degrees, 0, "Cool")
+}
+
+
+hubitat.device.HubAction setThermostatMode(String thermostatmode, String addr) {
+	if (dbgEnable)
+		log.debug "${device.label} setThermostatMode tstat: ${thermostat} mode ${thermostatmode}"
+    setMode(addr, thermostatmode)
+}
+
+hubitat.device.HubAction setThermostatFanMode(String fanmode, String addr) {
+	if (dbgEnable)
+		log.debug "${device.label} setThermostatFanMode tstat: ${thermostat} fanmode ${fanmode}"
+}
+
 
 
