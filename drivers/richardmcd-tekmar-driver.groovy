@@ -1,6 +1,6 @@
 /***********************************************************************************************************************
  *
- *  A Hubitat Driver using Telnet on the local network to connect to the tekmar 482 rs232 gateway
+ *  A Hubitat Driver using TCP to RS232 gateway on the local network to connect to the tekmar 482 
  *
  *  License:
  *  This program is free software: you can redistribute it and/or modify it under the terms of the GNU
@@ -18,12 +18,12 @@
  *  Protocol Reference: http://www.tekmarcontrols.com/products/accessories/482-firmware-update/7-products/219-tekmar-home-automation-protocol.html
  *
  *  TODO:
- *     - make f whole numbers
- *     - change mode
  *     - change fan mode
  *     - make hash lists common
+ *     - properly parse messages containing 0x35
  *     - checksum incoming messages
  *     - fan relay output
+ *     - make temp adj to a +/- 1f on the actual decimal current
  *     - outdoor temp as temperature sensor
  *     - what to do with floor temp measurements and setpoints?
  *
@@ -39,8 +39,9 @@ metadata {
 	definition(name: "Tekmar 482 Driver", namespace: "proto", author: "Richard McDougall") {
 		capability "Initialize"
         capability "Configuration"
-        capability "Thermostat"
-        
+        //capability "Thermostat"
+        capability "TemperatureMeasurement"
+
 		command "refreshTemperatureStatus"
 	}
 	preferences {
@@ -96,7 +97,7 @@ def initialize() {
 		//telnetConnect([termChars: [53]], ip, port.toInteger(), null, null)
         interfaces.rawSocket.connect(ip, port.toInteger(), 
                                      byteInterface: true,
-								     //readDelay: 150,
+								     //readDelay: 1)
                                      eol: 53)
 		//give it a chance to start
 		pauseExecution(1000)
@@ -189,8 +190,8 @@ def heartbeat() {
 		runIn(timeout * 60, "telnetTimeout")
 }
 
-// CA 08 06 02 2F 2F 01 00 00 2F CA 00 00 0A 
 
+// CA 08 06 02 2F 2F 01 00 00 2F CA 00 00 0A 
 def dump_hex(bytes) {
    def s = "";
    for (Byte b : bytes) {
@@ -198,6 +199,7 @@ def dump_hex(bytes) {
    }
    return s;
 }
+
 
 private String unhexify(String hexStr) {
   StringBuilder output = new StringBuilder("");
@@ -211,7 +213,6 @@ private String unhexify(String hexStr) {
 }
 
 
-
 def unpack(message) {
     def s = "";
     def lastChar = 0;
@@ -223,6 +224,7 @@ def unpack(message) {
     }
     return s;
 }
+
 
 
 
@@ -394,13 +396,20 @@ def tekmarTemp(String message, Integer offset) {
     return tempF;
 }
 
-def tekmarTokens(String token) {
-   def tekmarTokenList = [ 
+@Field final Map tekmarTokenList = [ 
         'SOM'    :   0xCA,
         'TYPE'   :   0x06,
         'ESC'    :   0x2F,
         'EOM'    :   0x35
     ];
+
+@Field final Map tekmarEscapedTokenList = [ 
+        'SOM'    :   0xCA,
+        'ESC'    :   0x2F,
+        'EOM'    :   0x35
+    ];
+
+def tekmarTokens(String token) {
     return tekmarTokenList[token];
 }
 
@@ -450,7 +459,7 @@ def tekmarFromTempE(String message, Integer offset) {
 
 def tekmarToTempE(tempF) {
     // degE = 2 *(degC)
-    Integer degE = 2 * ((tempF - 32) / 1.8)
+    Integer degE = Math.round(2 * ((tempF - 32) / 1.8))
     return degE;
 }
 
@@ -486,12 +495,12 @@ def tekmarDemand(String message, Integer offset) {
 
 
 @Field final Map tekmarModes = [ 
-        0: 'Off',
-        1: 'Heat',
-        2: 'Auto',
-        3: 'Cool',
-        4: 'Vent',
-        6: 'Emergency'
+        0: 'off',
+        1: 'heat',
+        2: 'auto',
+        3: 'cool',
+        4: 'vent',
+        6: 'emergency'
     ];
 
 def methodModeField(mode) {
@@ -603,8 +612,10 @@ def parse(String message) {
             data["temp"] = temp;
         }
         if (methodName.equals("OutdoorTemp")) {
-            data["tstatId"] = 1000;
-            data["tstatName"] = 'Outdoor';
+            //data["tstatId"] = 1000;
+            //data["tstatName"] = 'Outdoor';
+            log.debug "${device.label} outdoor temp  : " + String.format("%d", temp);
+            sendMsg(name: "temperature", value: temp as Integer)
         }
     }
     
@@ -698,7 +709,7 @@ def createTstat(addr, name) {
     newDevice = getChildDevice("${device.deviceNetworkId}_T_${addr}");
     if ((newDevice != null) && (newDevice.label.equals(name) == false)) {
         deleteChildDevice(childDeviceNetworkId)
-        addChildDevice("proto", "Tekmar Thermostat", childDeviceNetworkId, [name: devname, isComponent: false, label: name])
+        addChildDevice("proto", "Tekmar Thermostat", childDeviceNetworkId, [name: addr, isComponent: false, label: name])
         // Maybe use setDisplayName(String displayName) instead?
         if (dbgEnable)
 		    log.debug "${device.label}: rename addr: ${addr}, name: ${name}"
@@ -720,6 +731,8 @@ def updateChildDevice(data) {
         childDevice.parse(data);
     }
 }
+
+
 def tekmarChecksum(pck) {
     checksum = 0
     for (b in pck) {
@@ -727,7 +740,54 @@ def tekmarChecksum(pck) {
     }
     return checksum & 0xFF
 }
-        
+
+
+def stringToBytes(str) {
+    Byte[] bytes = new Byte[str.length()]
+    def bNum = 0
+    for (char b: str) {
+        bytes[bNum] = b
+        bNum++;
+    }
+    return bytes;
+}
+
+
+def pack_old(message) {
+    def s = "";
+    for (char b: message) {
+        if (tekmarTokenList.containsValue(b as Integer) == true) {
+            s = s + new String(tekmarTokens('ESC') as char);
+            //s = s + "foo"
+        }
+        s = s + b;
+    }
+    dump = dump_hex(s);    
+    log.debug "${device.label}: send TRPC packed  x ${dump}"
+    return stringToBytes(s);
+}
+
+
+def pack(bytes) {
+    Byte[] tempBytes = new Byte[bytes.length * 2]
+    //def check = ""
+    def bNum = 0
+    def tempBNum = 0
+    for (b in bytes) {
+        //check = check + String.format("%X:%b, ", (b & 0xff), tekmarEscapedTokenList.containsValue(b & 0xFF))
+        if ((bNum != 0) && (bNum != (bytes.length - 1)) && 
+            (tekmarEscapedTokenList.containsValue(b & 0xFF) == true)) {
+            tempBytes[tempBNum] = tekmarTokens('ESC')
+            tempBNum++
+        }
+        tempBytes[tempBNum] = b
+        bNum++
+        tempBNum++
+    }
+    //log.debug "${device.name} checking ${check}" 
+    return tempBytes.getAt([0..(tempBNum-1)])
+}
+
 
 def createTRPC(packet) {
     
@@ -756,7 +816,12 @@ def createTRPC(packet) {
     checksum = tekmarChecksum(pck[1..(pck.length - 3)]);
     pck[p] = checksum
     pck[p + 1] = tekmarTokens('EOM')
-    return pck
+    dump = dump_hex(pck);    
+    log.debug "${device.label}: send TRPC unpacked ${dump}"
+    packed = pack(pck)
+    //dump = dump_hex(packed);    
+    //log.debug "${device.label}: send TRPC packed x  ${dump}"
+    return packed as byte[]
 }
     
     

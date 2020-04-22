@@ -32,6 +32,8 @@ metadata {
 		command "setThermostatHoldMode", [[name: "hold*", type: "ENUM", constraints: ["off", "on"]]]
 		command "setThermostatTemperature", [[name: "temperature*", description: "1 - 99", type: "NUMBER"]]
 		attribute "hold", "string"
+        attribute "tekmarExactCoolSetpoint", "NUMBER"
+        attribute "tekmarExactHeatSetpoint", "NUMBER"
 	}
 	preferences {
 		input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
@@ -126,33 +128,46 @@ def parse(HashMap data) {
         log.debug "${device.label} thermostatMode is ${currentMode}"
 	}
     
-    if (data.containsKey("CoolSetpoint") && (coolingSetpoint = Math.round(data["CoolSetpoint"])) && 
-        (device.currentState("coolingSetpoint")?.value == null || device.currentState("coolingSetpoint").value != coolingSetpoint)) {
-		descriptionText = "${device.label} CoolSetpoint is ${coolingSetpoint}"
-		if (txtEnable)
-		     log.info descriptionText
-		sendEvent(name: "coolingSetpoint", value: coolingSetpoint, descriptionText: descriptionText)
+    if (data.containsKey("CoolSetpoint") && (coolingSetpoint = data["CoolSetpoint"])) {
+        if (device.currentState("coolingSetpoint")?.value == null || 
+             device.currentState("coolingSetpoint").value != coolingSetpoint) {
+    		descriptionText = "${device.label} CoolSetpoint is ${coolingSetpoint}"
+            visibleCoolingSetpoint = Math.round(coolingSetpoint)
+            if (txtEnable) {
+		        log.info "${device.label} CoolSetpoint is ${visibleCoolingSetpoint}"
+                log.info "${device.label} tekmarExactCoolSetpoint is ${coolingSetpoint}"
+            }
+		    sendEvent(name: "coolingSetpoint", value: visibleCoolingSetpoint, descriptionText: descriptionText)
+        }
+		sendEvent(name: "tekmarExactCoolSetpoint", value: coolingSetpoint, descriptionText: descriptionText)
+	} 
 
-	}  
-    if (currentMode.equals("Cool") && (coolingSetpoint != null)) {
-    	descriptionText = "${device.label} thermostatSetpoint is ${coolingSetpoint}"
+    if (currentMode.equals("cool") && (visibleCoolingSetpoint != null)) {
+    	descriptionText = "${device.label} thermostatSetpoint is ${visibleCoolingSetpoint}"
         log.debug "${descriptionText}"
-        sendEvent(name: "thermostatSetpoint", value: coolingSetpoint, descriptionText: descriptionText)
+        sendEvent(name: "thermostatSetpoint", value: visibleCoolingSetpoint, descriptionText: descriptionText)
     }
     
-    if (data.containsKey("HeatSetpoint") && (heatingSetpoint = Math.round(data["HeatSetpoint"])) && 
-        (device.currentState("heatingSetpoint")?.value == null || device.currentState("heatingSetpoint").value != heatingSetpoint)) {
-		    descriptionText = "${device.label} heatingSetpoint is ${heatingSetpoint}"
-		    if (txtEnable)
-			    log.info descriptionText
-		    sendEvent(name: "heatingSetpoint", value: heatingSetpoint, descriptionText: descriptionText) 
-	}     
-    if (currentMode.equals("Heat") && (coolingSetpoint != null)) {
-    	descriptionText = "${device.label} thermostatSetpoint is ${coolingSetpoint}"
+
+    if (data.containsKey("HeatSetpoint") && (heatingSetpoint = data["HeatSetpoint"])) {
+        if (device.currentState("heatingSetpoint")?.value == null || 
+             device.currentState("heatingSetpoint").value != heatingSetpoint) {
+    		descriptionText = "${device.label} HeatSetpoint is ${heatingSetpoint}"
+            visibleHeatingSetpoint = Math.round(heatingSetpoint)
+            if (txtEnable) {
+		        log.info "${device.label} HeatSetpoint is ${visibleHeatingSetpoint}"
+		        log.info "${device.label} tekmarExactHeatSetpoint is ${heatingSetpoint}"
+            }
+		    sendEvent(name: "heatingSetpoint", value: visibleHeatingSetpoint, descriptionText: descriptionText)
+        }
+		sendEvent(name: "tekmarExactHeatSetpoint", value: heatingSetpoint, descriptionText: descriptionText)
+	} 
+
+    if (currentMode.equals("heat") && (visibleHeatingSetpoint != null)) {
+    	descriptionText = "${device.label} thermostatSetpoint is ${visibleHeatingSetpoint}"
         log.debug "${descriptionText}"
-        sendEvent(name: "thermostatSetpoint", value: heatingSetpoint, descriptionText: descriptionText)
-    }
-        
+        sendEvent(name: "thermostatSetpoint", value: visibleHeatingSetpoint, descriptionText: descriptionText)
+    } 
 
     
     
@@ -193,6 +208,13 @@ def off() {
 }
 
 def setCoolingSetpoint(BigDecimal degrees) {
+    def heatingSetpoint
+    if (device.currentState("heatingSetpoint")?.value == null || 
+        (heatingSetpoint = device.currentState("heatingSetpoint").value)) {
+		    descriptionText = "${device.label} heatingSetpoint is ${heatingSetpoint}"
+		    if (txtEnable)
+			    log.info descriptionText
+	}     
 	parent.sendMsg(parent.setCoolingSetpoint(degrees, getThermID()))
 }
 
@@ -229,12 +251,12 @@ String getThermID() {
 }
 
 @Field final Map tekmarThermostatMode = 
-    [   0: 'Off',
-        1: 'Heat',
-        2: 'Auto',
-        3: 'Cool',
-        4: 'Vent',
-        6: 'Emergency']
+    [   0: 'off',
+        1: 'heat',
+        2: 'auto',
+        3: 'cool',
+        4: 'vent',
+        6: 'emergency']
 @Field final Map tekmarThermostatHold = 
     ['0': 'Off', 
      '1': 'On']
