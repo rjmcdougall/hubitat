@@ -74,8 +74,8 @@ def parse(List description) {
 
 
 def parse(HashMap data) {
-	log.debug "parse(HashMap data) received ${data}"
-    log.debug "parse(HashMap data) device ${device}"
+	//log.debug "parse(HashMap data) received ${data}"
+    //log.debug "parse(HashMap data) device ${device}"
 
     /*
     displayName = device.getDisplayName(device);
@@ -125,7 +125,7 @@ def parse(HashMap data) {
     currentMode = "unknown"
     if (device.currentState("thermostatMode")?.value != null) {
         currentMode = device.currentState("thermostatMode").value
-        log.debug "${device.label} thermostatMode is ${currentMode}"
+        //log.debug "${device.label} thermostatMode is ${currentMode}"
 	}
     
     if (data.containsKey("CoolSetpoint") && (coolingSetpoint = data["CoolSetpoint"])) {
@@ -142,12 +142,14 @@ def parse(HashMap data) {
 		sendEvent(name: "tekmarExactCoolSetpoint", value: coolingSetpoint, descriptionText: descriptionText)
 	} 
 
+    /*
     if (currentMode.equals("cool") && (visibleCoolingSetpoint != null)) {
     	descriptionText = "${device.label} thermostatSetpoint is ${visibleCoolingSetpoint}"
-        log.debug "${descriptionText}"
+        //log.debug "${descriptionText}"
         sendEvent(name: "thermostatSetpoint", value: visibleCoolingSetpoint, descriptionText: descriptionText)
     }
-    
+    */
+   
 
     if (data.containsKey("HeatSetpoint") && (heatingSetpoint = data["HeatSetpoint"])) {
         if (device.currentState("heatingSetpoint")?.value == null || 
@@ -163,11 +165,13 @@ def parse(HashMap data) {
 		sendEvent(name: "tekmarExactHeatSetpoint", value: heatingSetpoint, descriptionText: descriptionText)
 	} 
 
+    /*
     if (currentMode.equals("heat") && (visibleHeatingSetpoint != null)) {
     	descriptionText = "${device.label} thermostatSetpoint is ${visibleHeatingSetpoint}"
-        log.debug "${descriptionText}"
+        //log.debug "${descriptionText}"
         sendEvent(name: "thermostatSetpoint", value: visibleHeatingSetpoint, descriptionText: descriptionText)
     } 
+    */
 
     
     

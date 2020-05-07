@@ -19,11 +19,10 @@
  *
  *  TODO:
  *     - change fan mode
- *     - make hash lists common
  *     - properly parse messages containing 0x35
  *     - checksum incoming messages
- *     - fan relay output
- *     - make temp adj to a +/- 1f on the actual decimal current
+ *     - add some lag to coalesce temp change settings when hitting button multiple times
+ *.    - make temp adj to a +/- 1f on the actual decimal current
  *     - outdoor temp as temperature sensor
  *     - what to do with floor temp measurements and setpoints?
  *
@@ -49,6 +48,7 @@ metadata {
 		input name: "port", type: "number", title: "Port", range: 1..65535, required: true, defaultValue: 2101
 		input name: "timeout", type: "number", title: "Timeout in minutes", range: 0..1999, defaultValue: 0
         input name: "pollInterval", type: "number", title: "Pollinterval in seconds", range: 0..1999, defaultValue: 20
+		input name: "discoveryEnable", type: "bool", title: "Enable Thermostat Discovery", defaultValue: true
 		input name: "tempCelsius", type: "bool", title: "Temperatures in ˚C", defaultValue: false
 		input name: "dbgEnable", type: "bool", title: "Enable debug logging", defaultValue: false
         input ( name: "configLoggingLevelIDE", title: "IDE Live Logging Level:\nMessages with this level and higher will be logged to the IDE.", type: "enum",
@@ -63,6 +63,28 @@ metadata {
             defaultValue: "5", displayDuringSetup: true, required: false )   
 	}
 }
+
+// Update this list with friendly names for your tstats
+// First run with discovery enable, then edit list
+@Field final tstatNames = [ 
+        0 : "None",
+                    201 : 'Family',
+                    202 : 'Master',
+                    203 : 'Master Bath',
+                    204 : 'Max',
+                    205 : 'Living',
+                    206 : 'Loft',
+                    207 : 'Madison',
+                    208 : 'Sam',
+                    209 : 'Garage',
+                    210 : 'Shop',
+                    2001 : 'Patio (2)',
+                    2002 : 'DHW (2)',
+                    2018 : 'Pool House (2)',
+                    3001 : 'Patio (3)',
+                    3002 : 'DHW (3)',
+                    3018 : 'Pool House (3)'
+];
 
 //general handlers
 def installed() {
@@ -88,18 +110,17 @@ def initialize() {
 		device.updateSetting("tempCelsius", [type: "bool", value: "false"])
 	if (dbgEnable == null)
 		device.updateSetting("dbgEnable", [type: "bool", value: "false"])
-	if (pollInterval == null)
+	if (discoveryEnable == null)
+		device.updateSetting("discoveryEnable", [type: "bool", value: "false"])
+    if (pollInterval == null)
 		device.updateSetting("pollInterval", [type: "number", value: "10"])
 	telnetClose()
 	boolean success = true
 	try {
-		//open telnet connection
-		//telnetConnect([termChars: [53]], ip, port.toInteger(), null, null)
         interfaces.rawSocket.connect(ip, port.toInteger(), 
                                      byteInterface: true,
 								     //readDelay: 1)
                                      eol: 53)
-		//give it a chance to start
 		pauseExecution(1000)
 		if (dbgEnable)
 			log.debug "${device.label}: Socket connection to Tekmar 482 established"
@@ -108,7 +129,7 @@ def initialize() {
 		success = false
 	}
 	if (success) {
-		heartbeat() // Start checking for  timeout
+		heartbeat()
 		refresh()
 	}
 }
@@ -116,7 +137,6 @@ def initialize() {
 def configure() {
     log.debug "${device.label} Executing 'configure()'"
     state.loggingLevelIDE = (settings.configLoggingLevelIDE) ? settings.configLoggingLevelIDE.toInteger() : 3
-    //updateDeviceNetworkID()
 
     unschedule()
     schedule("0/${settings.pollInterval} * * * * ? *", refresh)
@@ -132,20 +152,11 @@ def configure() {
 }
 
 
-
-
 def poll() {
-    log.debug "${device.label}Executing poll()"
     refresh()
 }
 
 def refresh() {
-    //log.debug "${device.label} Executing 'refresh()'"
-    //List<hubitat.device.HubAction> cmds = []
-	//cmds.add(refreshTemperatureStatus())
-	//return delayBetween(cmds, 1000)
-    
-    //socketStatus(String message)
     enableReporting()
 }
 
@@ -175,12 +186,12 @@ int getReTry(boolean inc) {
 	return reTry
 }
 
-def telnetStatus(String status) {
-	log.warn "${device.label} telnetStatus error: ${status}"
+def socketStatus(String status) {
+	log.warn "${device.label} socketStatus error: ${status}"
 	if (status == "receive error: Stream is closed" || status == "send error: Broken pipe (Write failed)" || status == "timeout") {
 		getReTry(true)
-		log.error "Telnet connection dropped..."
-		log.warn "${device.label} Telnet is restarting..."
+		log.error "Socket connection dropped..."
+		log.warn "${device.label} Socket is restarting..."
 		initialize()
 	}
 }
@@ -190,8 +201,6 @@ def heartbeat() {
 		runIn(timeout * 60, "telnetTimeout")
 }
 
-
-// CA 08 06 02 2F 2F 01 00 00 2F CA 00 00 0A 
 def dump_hex(bytes) {
    def s = "";
    for (Byte b : bytes) {
@@ -226,11 +235,6 @@ def unpack(message) {
 }
 
 
-
-
-
-
-
 def serviceName(service) {
     
     def services = [ 0x00 : 'Update',
@@ -242,10 +246,7 @@ def serviceName(service) {
     return services[service];
 }
 
-
-
-def methodName(Integer method) {
-    def tekmarMethods = [ 
+@Field final  tekmarMethods = [ 
                 0x000 : 'NullMethod',
                 0x107 : 'NetworkError',
                 0x10F : 'ReportingState',
@@ -274,40 +275,14 @@ def methodName(Integer method) {
                 0x150 : 'RelativeHumidity',
                 0x151 : 'HumidityMax',
                 0x152 : 'HumidityMin'];
+
+def methodName(Integer method) {
         return tekmarMethods[method];
 }
 
 def methodNum(String methodName) {
-    def tekmarMethods = [ 
-                0x000 : 'NullMethod',
-                0x107 : 'NetworkError',
-                0x10F : 'ReportingState',
-                0x117 : 'OutdoorTemp',
-                0x11F : 'DeviceAttributes',
-                0x127 : 'ModeSetting',
-                0x12F : 'ActiveDemand',
-                0x137 : 'CurrentTemperature',
-                0x138 : 'CurrentFloorTemp',
-                0x13F : 'HeatSetpoint',
-                0x147 : 'CoolSetpoint',
-                0x14F : 'SlabSetpoint',
-                0x157 : 'FanPercent',
-                0x15F : 'TakingAddress',
-                0x167 : 'DeviceInventory',
-                0x16F : 'SetbackEnable',
-                0x177 : 'SetbackState',
-                0X17F : 'SetbackEvents',
-                0x187 : 'FirmwareRevision',
-                0x18F : 'ProtocolVersion',
-                0x197 : 'DeviceType',
-                0x19F : 'DeviceVersion',
-                0x1A7 : 'DateTime',
-                0x13D : 'SetpointGroupEnable',
-                0x13E : 'SetpointDevice',
-                0x150 : 'RelativeHumidity',
-                0x151 : 'HumidityMax',
-                0x152 : 'HumidityMin'];
-    return (tekmarMethods.collectMany{ k,v -> (v == methodName) ? [k] : []}[0] as Integer)
+    return (tekmarMethods.collectMany{ k,v -> 
+        (v == methodName) ? [k] : []}[0] as Integer)
 }
 
 def methodAddressField(String method) {
@@ -515,7 +490,7 @@ def modeNum(mode) {
 def tekmarMode(String message, Integer offset) {
 
     byte mode = message.charAt(offset);
-    log.debug "${device.label} mode  : $mode";
+    //log.debug "${device.label} mode  : $mode";
     modeStr = "error in message";
     if (mode < 7) {
        modeStr = methodModeField(mode & 0xff);
@@ -526,49 +501,34 @@ def tekmarMode(String message, Integer offset) {
 }
 
 def tstatName(Integer addr) {
-    def tstatNames = [ 
-        0 : "None",
-                    201 : 'Family',
-                    202 : 'Master',
-                    203 : 'Master Bath',
-                    204 : 'Max',
-                    205 : 'Living',
-                    206 : 'Loft',
-                    207 : 'Madison',
-                    208 : 'Sam',
-                    209 : 'Garage',
-                    210 : 'Shop',
-                    2001 : 'Patio (2)',
-                    2002 : 'DHW (2)',
-                    2018 : 'Pool House (2)',
-                    3001 : 'Patio (3)',
-                    3002 : 'DHW (3)',
-                    3018 : 'Pool House (3)'
-    ];
         return tstatNames[addr];
 }
     
 // Tekmar 482 Event Receipt Lines
 def parse(String message) {
     
-    pck = hubitat.helper.HexUtils.hexStringToByteArray(message)
-    
+    pck = hubitat.helper.HexUtils.hexStringToByteArray(message)                      
     def unpacked = unpack(pck);
-    
-    def raw = dump_hex(pck);
-    def m = dump_hex(unpacked);
-    
+   
     if (dbgEnable) {
-        //log.debug "${device.label} byte " + s;
-        //s = dump_hex(message);
-        //u = dump_hex(unpacked);
-		//log.debug "${device.label} Parsing Incoming message    :   $raw";
-		//log.debug "${device.label} Parsing Incoming message    :   $m";
+        def raw = dump_hex(pck);
+        def m = dump_hex(unpacked);
+        log.debug "${device.label} Parsing RAW      message    :   $raw";
+		log.debug "${device.label} Parsing Unpacked message    :   $m";
     }
     
     // Decode header
     byte bodyLength = unpacked.charAt(1);
     byte rpcType = unpacked.charAt(2);
+
+    // Todo: append partial message if we had one prior
+    // Occurs when packed contains a data value that triggers socket
+    // Read completion (0x35)
+    if (bodyLength < (unpacked.size() - 5)) {
+             log.debug("${device.label} partial message")
+             state.partialMessage = message
+            return
+    }
     
     if (rpcType != 6) {
         log.debug "${device.label} not a tekmar message    :  $raw";
@@ -587,7 +547,6 @@ def parse(String message) {
     def methodName = methodName(method)
     
     if (dbgEnable) {
-        //log.debug "${device.label} service : " + String.format("%04X: %s", service, serviceName);
         log.debug "${device.label} method  : " + String.format("%04X:%s, %04X:%s [%s]", service, serviceName, method, methodName, m);
     }
     
@@ -611,15 +570,15 @@ def parse(String message) {
         } else {
             data["temp"] = temp;
         }
+        // Send the outdoor temp to this device
         if (methodName.equals("OutdoorTemp")) {
-            //data["tstatId"] = 1000;
-            //data["tstatName"] = 'Outdoor';
-            log.debug "${device.label} outdoor temp  : " + String.format("%d", temp);
-            sendMsg(name: "temperature", value: temp as Integer)
+            log.debug "${device.label} outdoor temp  : " + String.format("%f", temp);
+            sendEvent(name: "temperature", value: temp as Integer, unit:"F")
+            return
         }
     }
     
-    // If the message has a Tekmar set temp, extract it
+    // If the message has a Tekmar setpoint temp, extract it
     if ((offset = methodTempEField(methodName)) > 1) {
         setpoint = tekmarFromTempE(unpacked, offset);
         data[methodName] = setpoint;
@@ -643,12 +602,14 @@ def parse(String message) {
         data["mode"] = mode;
     } 
     
-    if (data.containsKey("tstatId")) {
+    
+    if (discoveryEnable && data.containsKey("tstatId")) {
+        log.debug "${device.label} discoveryEnable  : ${discoveryEnable} tstat: ${tstatId} "
         createTstat(data["tstatId"],  data["tstatName"] + " Climate");
     }
     
     debugStr = methodName;
-    if (0) {
+    if (dbgEnable) {
         if (data.containsKey("tstatId")) {
             debugStr = debugStr + String.format(" address %d:%s", data["tstatId"], data["tstatId"]);
         }
@@ -670,12 +631,6 @@ def parse(String message) {
     updateChildDevice(data);
 }
 
-
-
-hubitat.device.HubAction sendMsg(String msg) {
-	//return new hubitat.device.HubAction(msg, hubitat.device.Protocol.TELNET)
-    //return new sendMessage(String msg)
-}
 
 hubitat.device.HubAction sendMsg(hubitat.device.HubAction action = null) {
 	return action
@@ -699,7 +654,6 @@ def createTstat(addr, name) {
     
     if (getChildDevice("${device.deviceNetworkId}_T_${addr}") == null) {
             devname = addr;
-            //addChildDevice("hubitat", "Virtual Temperature Sensor", childDeviceNetworkId, [name: tstatName, isComponent: false, label: tstatName])
             addChildDevice("proto", "Tekmar Thermostat", childDeviceNetworkId, [name: devname, isComponent: false, label: name])
 			newDevice = getChildDevice(childDeviceNetworkId)
 	        if (dbgEnable)
@@ -763,7 +717,7 @@ def pack_old(message) {
         s = s + b;
     }
     dump = dump_hex(s);    
-    log.debug "${device.label}: send TRPC packed  x ${dump}"
+    //log.debug "${device.label}: send TRPC packed  x ${dump}"
     return stringToBytes(s);
 }
 
@@ -817,7 +771,7 @@ def createTRPC(packet) {
     pck[p] = checksum
     pck[p + 1] = tekmarTokens('EOM')
     dump = dump_hex(pck);    
-    log.debug "${device.label}: send TRPC unpacked ${dump}"
+    //log.debug "${device.label}: send TRPC unpacked ${dump}"
     packed = pack(pck)
     //dump = dump_hex(packed);    
     //log.debug "${device.label}: send TRPC packed x  ${dump}"
@@ -895,7 +849,7 @@ def setPoint(addrStr, temp, setBackState, mode) {
         return
     }
     
-    log.debug "${device.label} setPoint ${method}"
+    //log.debug "${device.label} setPoint ${method}"
         
     def data = String.format("%02X%02X%02X%02X", 
                              addr & 0xff, (addr >> 8) & 0xff,
@@ -910,7 +864,7 @@ def setPoint(addrStr, temp, setBackState, mode) {
     
     pck = createTRPC(packet)
     dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
+    //log.debug "${device.label}:  ${dump}"
 
     interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
 }
@@ -924,7 +878,7 @@ def setMode(addrStr, modeStr) {
         return
     }
     
-    log.debug "${device.label} setMode ${method}"
+    //log.debug "${device.label} setMode ${method}"
         
     def data = String.format("%02X%02X%02X", 
                              addr & 0xff, (addr >> 8) & 0xff,
@@ -938,7 +892,7 @@ def setMode(addrStr, modeStr) {
     
     pck = createTRPC(packet)
     dump = dump_hex(pck);    
-    log.debug "${device.label}:  ${dump}"
+    //log.debug "${device.label}:  ${dump}"
 
     interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
 }
@@ -948,14 +902,16 @@ hubitat.device.HubAction setHeatingSetpoint(BigDecimal degrees, String addr) {
 	if (dbgEnable)
 		log.debug "${device.label} setHeatingSetpoint tstat: ${addr} temperature ${degrees}"
     // Todo: add setback support
-    setPoint(addr, degrees, 0, "Heat")
+    // A value of THA_CURRENT = 0x07 may be used to request the current setpoint instead of specifying the actual setback state.
+    setPoint(addr, degrees, 7, "Heat")
 }
 
 hubitat.device.HubAction setCoolingSetpoint(BigDecimal degrees, String addr) {
 	if (dbgEnable)
 		log.debug "${device.label} setCoolingSetpoint tstat: ${addr} temperature ${degrees}"
     // Todo: add setback support
-    setPoint(addr, degrees, 0, "Cool")
+    // A value of THA_CURRENT = 0x07 may be used to request the current setpoint instead of specifying the actual setback state.
+    setPoint(addr, degrees, 7, "Cool")
 }
 
 
