@@ -116,6 +116,7 @@ def initialize() {
 		device.updateSetting("pollInterval", [type: "number", value: "10"])
 	telnetClose()
 	boolean success = true
+    state.partialMessageCount = 0
 	try {
         interfaces.rawSocket.connect(ip, port.toInteger(), 
                                      byteInterface: true,
@@ -353,6 +354,39 @@ def methodTempField(String method) {
     return methodTemp[method];
 }
 
+def methodHumidityField(String method) {
+   def methodHumidity = [ 
+        'NullMethod'        :   0,
+        'NetworkError'      :   0,
+        'ReportingState'    :   0,
+        'OutdoorTemp'       :   8,
+        'DeviceAttributes'  :   0,
+        'ModeSetting'       :   0,
+        'ActiveDemand'      :   0,
+        'CurrentTemperature':   0,
+        'CurrentFloorTemp'  :   0,
+        'HeatSetpoint'      :   0,
+        'CoolSetpoint'      :   0,
+        'SlabSetpoint'      :   0,
+        'FanPercent'        :   0,
+        'TakingAddress'     :   0,
+        'DeviceInventory'   :   0,
+        'SetbackEnable'     :   0,
+        'SetbackState'      :   0,
+        'SetbackEvents'     :   0,
+        'FirmwareRevision'  :   0,
+        'ProtocolVersion'   :   0,
+        'DeviceType'        :   0,
+        'DeviceVersion'     :   0,
+        'DateTime'          :   0,
+        'SetpointGroupEnable':  0,
+        'SetpointDevice'    :   0,
+        'RelativeHumidity'  :   10,
+        'HumidityMax'       :   10,
+        'HumidityMin'       :   10
+    ];
+    return methodHumidity[method];
+}
 
 
 def tekmarAddress(String message, Integer offset) {
@@ -441,11 +475,16 @@ def tekmarToTempE(tempF) {
 @Field static Map tekmarDemands = [ 
         0: 'Off',
         1: 'Heat',
+        2: 'Unknown-2',
         3: 'Cool'
     ];
 
 def methodDemandField(demand) {
-    return tekmarDemands[demand];
+    if (demand < 4) {
+        return tekmarDemands[demand];
+    } else {
+        return ("Unknown Mode " + demand);
+    }
 }
 
 def methodDeviceCapabilityField(capability) {
@@ -468,6 +507,10 @@ def tekmarDemand(String message, Integer offset) {
     return demandStr;
 }
 
+def tekmarRelativeHumidity(String message, Integer offset) {
+    byte rh = message.charAt(offset);
+    return rh;
+}
 
 @Field final Map tekmarModes = [ 
         0: 'off',
@@ -507,29 +550,57 @@ def tstatName(Integer addr) {
 // Tekmar 482 Event Receipt Lines
 def parse(String message) {
     
-    pck = hubitat.helper.HexUtils.hexStringToByteArray(message)                      
+    def pck
+    
+    if (state.partialMessage != null) {
+        log.info("${device.label} prior partial message: $state.partialMessage");
+        log.info "${device.label} This RAW message     :   $message";
+        pck = hubitat.helper.HexUtils.hexStringToByteArray(state.partialMessage + message)                      
+        def raw = dump_hex(pck);
+        log.info "${device.label} New RAW message      :   $raw";
+        state.partialMessage = null;
+    } else {
+        pck = hubitat.helper.HexUtils.hexStringToByteArray(message)                      
+    }
+    
     def unpacked = unpack(pck);
-   
+    packedSize = pck.size();
+    unpackedSize = unpacked.size();
+
+    // Decode header
+    byte bodyLength = unpacked.charAt(1);
+    expectedSize = unpackedSize - 5;
+    
     if (dbgEnable) {
         def raw = dump_hex(pck);
         def m = dump_hex(unpacked);
-        log.debug "${device.label} Parsing RAW      message    :   $raw";
-		log.debug "${device.label} Parsing Unpacked message    :   $m";
+        log.debug "${device.label} Parsing RAW      message    :   $raw ($packedSize)";
+		log.debug "${device.label} Parsing Unpacked message    :   $m ($unpackedSize)";
+		log.debug "${device.label} Parsing message             :   $m (budylength $bodyLength, expected $expectedSize)";
     }
     
-    // Decode header
-    byte bodyLength = unpacked.charAt(1);
-    byte rpcType = unpacked.charAt(2);
-
-    // Todo: append partial message if we had one prior
+    if (bodyLength > expectedSize) {
+        log.info "${device.label} oversized message       :   $m (bodylength $bodyLength, expected $expectedSize)";
+        return;
+    }
+    
     // Occurs when packed contains a data value that triggers socket
     // Read completion (0x35)
-    if (bodyLength < (unpacked.size() - 5)) {
-             log.debug("${device.label} partial message")
+    if (expectedSize < bodyLength) {
+        log.info("${device.label} partial message")
+        def raw = dump_hex(pck);
+             def m = dump_hex(unpacked);
+             def p = dump_hex(state.partialMessage);
+    		 log.info "${device.label} Partial message           :   $m (bodylength $bodyLength, expected $expectedSize)";
+             log.info "${device.label} Partial RAW      message  :   $raw ($packedSize)";
+	    	 log.info "${device.label} Partial Unpacked message  :   $m ($unpackedSize)";
+	    	 log.info "${device.label} Previous packed message   :   $p";
              state.partialMessage = message
+             state.partialMessageCount = state.partialMessageCount + 1
             return
     }
-    
+
+    byte rpcType = unpacked.charAt(2);
     if (rpcType != 6) {
         log.debug "${device.label} not a tekmar message    :  $raw";
         return
@@ -596,6 +667,12 @@ def parse(String message) {
         data["demand"] = demand;
     }
     
+    // If the message has a Tekmar relative humidity field, extract it
+    if ((offset = methodHumidityField(methodName)) > 1) {
+        rh = tekmarRelativeHumidity(unpacked, offset);
+        data[methodName] = rh;
+    }
+    
     // If the message has a Tekmar Mode field, extract it
     if (methodName.equals("ModeSetting") == true) {
         mode = tekmarMode(unpacked, 10);
@@ -615,6 +692,15 @@ def parse(String message) {
         }
         if (data.containsKey("temp")) {
             debugStr = debugStr + String.format(" temp %3f", temp);
+        }
+        if (data.containsKey("RelativeHumidity")) {
+            debugStr = debugStr + String.format(" humidity %3d", rh);
+        }
+        if (data.containsKey("HumidityMax")) {
+            debugStr = debugStr + String.format(" humidity max %3d", rh);
+        }
+        if (data.containsKey("HumidityMin")) {
+            debugStr = debugStr + String.format(" humidity min %3d", rh);
         }
         if (data.containsKey("coolSetpoint")) {
             debugStr = debugStr + String.format(" coolSetpoint %3f", coolSetpoint);
@@ -819,20 +905,30 @@ def enableReporting() {
 def queryTstat(addrStr) {
     
     addr = addrStr as int
-    
+    // Query modes
     def data = String.format("%02X%02X0000", addr & 0xff, (addr >> 8) & 0xff)
-    
     def packet = [
         'service' : 1,
         'method' :  0x127,//methodNum('ReportingState'),
         'data' : data
         ]
-    
     pck = createTRPC(packet)
     //dump = dump_hex(pck);    
     //log.debug "${device.label}:  ${dump}"
-
     interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))
+    
+    // Query humidity
+    data = String.format("%02X%02X0000", addr & 0xff, (addr >> 8) & 0xff)
+    packet = [
+        'service' : 1,
+        'method' :  methodNum('RelativeHumidity'),
+        'data' : data
+        ]
+    pck = createTRPC(packet)
+    //dump = dump_hex(pck);    
+    //log.debug "${device.label}:  ${dump}"
+    interfaces.rawSocket.sendMessage(hubitat.helper.HexUtils.byteArrayToHexString(pck))    
+    
 }
 
 
@@ -925,6 +1021,5 @@ hubitat.device.HubAction setThermostatFanMode(String fanmode, String addr) {
 	if (dbgEnable)
 		log.debug "${device.label} setThermostatFanMode tstat: ${thermostat} fanmode ${fanmode}"
 }
-
 
 
