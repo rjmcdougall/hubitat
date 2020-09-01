@@ -94,6 +94,29 @@ def parse(HashMap data) {
 		    sendEvent(name: "temperature", value: Math.round(fTemp), descriptionText: descriptionText)
 	}
     
+    if (data.containsKey("floor") && (fFloor = data["floor"]) && 
+        (device.currentValue("floortemperature") != fFloor)) {
+		    descriptionText = "${device.label} floor temperature is ${fFloor}"
+		    if (txtEnable)
+			    log.info descriptionText
+		    sendEvent(name: "floortemperature", value: Math.round(fFloor), descriptionText: descriptionText)
+	}
+    
+    if (data.containsKey("RelativeHumidity") && (RH = data["RelativeHumidity"]) && (RH > 0)) {
+		    descriptionText = "${device.label} humidity is ${RH}"
+		    if (txtEnable)
+			    log.info descriptionText
+		    sendEvent(name: "humidity", value: Math.round(RH), descriptionText: descriptionText)
+            if ((tempF = device.currentValue("temperature")) && (tempF > 0)) {
+                // Calculate dewPoint based on https://en.wikipedia.org/wiki/Dew_point
+                BigDecimal dewpointF = tempF - (0.36 * (100 - RH));
+                descriptionText = "${device.label} dewpoint is ${dewpointF}"
+		        if (txtEnable)
+			        log.info descriptionText
+		        sendEvent(name: "dewpoint", value: Math.round(dewpointF), descriptionText: descriptionText)
+            }
+	}
+    
     if (data.containsKey("mode") && (mode = data["mode"]) && 
         (device.currentState("mode")?.value == null || device.currentState("mode").value != mode)) {
 		    descriptionText = "${device.label} mode is ${mode}"
@@ -268,7 +291,6 @@ String getThermID() {
     ['0': 'Off', 
      '1': 'FanOn', 
      '2': 'FanAuto']
-
 
 
 
